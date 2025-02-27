@@ -1,0 +1,163 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+import os
+from openslide import open_slide
+from openslide.deepzoom import DeepZoomGenerator
+from PIL import ImageTk, Image
+import numpy as np
+
+def load_slide_properties():
+    slide_path = slide_path_entry.get()
+    if not slide_path or not os.path.exists(slide_path):
+        messagebox.showerror("Error", "Invalid slide path.")
+        return
+
+    try:
+        slide = open_slide(slide_path)
+        slide_props = slide.properties
+        global available_objectives
+        objective_power = slide_props.get('openslide.objective-power')
+        if objective_power:
+            available_objectives = [objective_power]
+        else:
+            available_objectives = ["Not Available"]
+
+        objective_dropdown['values'] = available_objectives
+        if available_objectives:
+            objective_var.set(available_objectives[0])
+
+        global dz_generator
+        dz_generator = DeepZoomGenerator(slide, tile_size=256, overlap=0, limit_bounds=False)
+
+        resolution_slider.config(to=dz_generator.level_count - 1)
+        messagebox.showinfo("Info", "Slide properties loaded. Select an objective power from the dropdown.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to load slide properties: {e}")
+
+def update_resolution():
+    level = resolution_slider.get()
+
+    try:
+        cols, rows = dz_generator.level_tiles[level]
+        tile = dz_generator.get_tile(level, (0, 0)).convert('RGB')
+        tile = tile.resize((600, 600))
+        img = ImageTk.PhotoImage(tile)
+        slide_thumb_label.configure(image=img)
+        slide_thumb_label.image = img
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to update resolution: {e}")
+
+def process_slide():
+    slide_path = slide_path_entry.get()
+    selected_objective = objective_var.get()
+    output_dir = save_dir_entry.get()
+    tile_level = level_spinbox.get()
+
+    if not slide_path or not os.path.exists(slide_path):
+        messagebox.showerror("Error", "Invalid slide path.")
+        return
+
+    if not output_dir:
+        messagebox.showerror("Error", "Please specify an output directory.")
+        return
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    try:
+        slide = open_slide(slide_path)
+        slide_props = slide.properties
+
+        slide_objective = float(slide_props.get('openslide.objective-power', 0))
+        if selected_objective != "Not Available" and float(selected_objective) != slide_objective:
+            messagebox.showwarning(
+                "Warning",
+                f"Selected objective ({selected_objective}) does not match slide's objective ({slide_objective})."
+            )
+
+        tiles = DeepZoomGenerator(slide, tile_size=256, overlap=0, limit_bounds=False)
+        level = int(tile_level)
+        if level >= tiles.level_count:
+            messagebox.showerror(
+                "Error", f"Level {level} does not exist. Max level is {tiles.level_count - 1}."
+            )
+            return
+
+        cols, rows = tiles.level_tiles[level]
+        level_dir = os.path.join(output_dir, f'level_{level}')
+        if not os.path.exists(level_dir):
+            os.makedirs(level_dir)
+
+        for row in range(rows):
+            row_dir = os.path.join(level_dir, f'row_{row}')
+            if not os.path.exists(row_dir):
+                os.makedirs(row_dir)
+
+            for col in range(cols):
+                tile_name = os.path.join(row_dir, f'col_{col}.png')
+                temp_tile = tiles.get_tile(level, (col, row)).convert('RGB')
+                temp_tile.save(tile_name)
+
+                if os.path.getsize(tile_name) < 50 * 1024:
+                    os.remove(tile_name)
+
+        messagebox.showinfo("Success", f"Tiles saved in {output_dir}. Tiles smaller than 50 KB were removed.")
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+def on_press(event):
+    global mouse_x, mouse_y
+    mouse_x, mouse_y = event.x, event.y
+
+def on_drag(event):
+    global mouse_x, mouse_y
+    delta_x = event.x - mouse_x
+    delta_y = event.y - mouse_y
+
+    current_x, current_y = slide_thumb_label.winfo_x(), slide_thumb_label.winfo_y()
+    slide_thumb_label.place(x=current_x + delta_x, y=current_y + delta_y)
+
+    mouse_x, mouse_y = event.x, event.y
+
+root = tk.Tk()
+root.title("Slide Viewer and Tiler")
+
+tk.Label(root, text="Slide File Path:").grid(row=0, column=0, sticky="e")
+slide_path_entry = tk.Entry(root, width=50)
+slide_path_entry.grid(row=0, column=1)
+tk.Button(root, text="Browse", command=lambda: slide_path_entry.insert(0, filedialog.askopenfilename())).grid(row=0, column=2)
+
+tk.Button(root, text="Load Slide Properties", command=load_slide_properties).grid(row=1, column=0, columnspan=3, pady=5)
+
+tk.Label(root, text="Available Objective Powers:").grid(row=2, column=0, sticky="e")
+objective_var = tk.StringVar()
+objective_dropdown = ttk.Combobox(root, textvariable=objective_var, state="readonly")
+objective_dropdown.grid(row=2, column=1, sticky="w")
+
+tk.Label(root, text="Save Tiles Directory:").grid(row=3, column=0, sticky="e")
+save_dir_entry = tk.Entry(root, width=50)
+save_dir_entry.grid(row=3, column=1)
+tk.Button(root, text="Browse", command=lambda: save_dir_entry.insert(0, filedialog.askdirectory())).grid(row=3, column=2)
+
+tk.Label(root, text="Tile Level:").grid(row=4, column=0, sticky="e")
+level_spinbox = ttk.Spinbox(root, from_=0, to=20, width=5)
+level_spinbox.grid(row=4, column=1, sticky="w")
+
+tk.Button(root, text="Process Slide", command=process_slide).grid(row=5, column=0, columnspan=3, pady=10)
+
+tk.Label(root, text="Resolution Level:").grid(row=6, column=0, sticky="e")
+resolution_slider = tk.Scale(root, from_=0, to=0, orient="horizontal", command=lambda e: update_resolution())
+resolution_slider.grid(row=6, column=1, sticky="w")
+
+image_window = tk.Toplevel(root)
+image_window.title("Image Display")
+image_window.geometry("650x650")
+
+slide_thumb_label = tk.Label(image_window)
+slide_thumb_label.pack(pady=10)
+
+slide_thumb_label.bind("<ButtonPress-1>", on_press)
+slide_thumb_label.bind("<B1-Motion>", on_drag)
+
+root.mainloop()
